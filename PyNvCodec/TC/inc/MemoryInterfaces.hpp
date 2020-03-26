@@ -16,6 +16,7 @@
 #include "TC_CORE.hpp"
 #include "nvEncodeAPI.h"
 #include <cuda.h>
+#include "dlpack.h"
 
 using namespace VPF;
 
