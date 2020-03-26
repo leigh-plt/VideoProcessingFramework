@@ -24,7 +24,6 @@
 #include <nppi_color_conversion.h>
 #include <array>
 #include <list>
-#include "dlpack.h"
 
 using namespace std;
 using namespace VPF;
