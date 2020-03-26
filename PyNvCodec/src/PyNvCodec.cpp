@@ -477,7 +477,7 @@ public:
 
   /* Return PyCapsule object with frames inside */
   py::capsule GetBatchImpl(list<int> frameIdx){
-    frames = GetBatch(frameIdx);
+    auto frames = GetBatch(frameIdx);
     return AsCapsule(frames, gpuId);
   }
 
