@@ -21,6 +21,11 @@
 #include <pybind11/stl.h>
 #include <sstream>
 
+#include <nppi_color_conversion.h>
+#include <array>
+#include <list>
+#include "dlpack.h"
+
 using namespace std;
 using namespace VPF;
 
@@ -271,6 +276,20 @@ public:
   }
 };
 
+bool ConvertNV12toRGB(Surface* pInput,
+                         CUdeviceptr pDst, size_t pDstPitch){
+
+  const Npp8u *const pSrc[] = {(const Npp8u *const)pInput->PlanePtr(0U),
+                               (const Npp8u *const)pInput->PlanePtr(1U)};
+  NppiSize oSizeRoi = {(int)pInput->Width(), (int)pInput->Height()};
+  auto err = nppiNV12ToRGB_709HDTV_8u_P2C3R(pSrc, (int)pInput->Pitch(),
+                                  (Npp8u *)pDst, (int)pDstPitch, oSizeRoi);
+  if (NPP_NO_ERROR != err) {
+    return false;
+  }
+  return true;
+};
+
 class PyNvDecoder {
   unique_ptr<DemuxFrame> upDemuxer;
   unique_ptr<NvdecDecodeFrame> upDecoder;
@@ -284,7 +303,7 @@ public:
       gpuOrdinal = 0U;
     }
     gpuId = gpuOrdinal;
-    cout << "Decoding on GPU " << gpuId << endl;
+    // cout << "Decoding on GPU " << gpuId << endl;
 
     upDemuxer.reset(DemuxFrame::Make(pathToFile.c_str()));
 
@@ -375,6 +394,10 @@ public:
     return params.videoContext.height;
   }
 
+  float GetFramerate() const {
+    return upDemuxer->GetFramerate();
+  }
+
   Pixel_Format GetPixelFormat() const {
     MuxingParams params;
     upDemuxer->GetParams(params);
@@ -415,6 +438,50 @@ public:
 
     return upDownloader->DownloadSingleSurface(spRawSufrace);
   }
+
+  /* Decodes a bunch of frame from video to shared_ptr<Surface>;
+   */
+  shared_ptr<Surface> GetBatch(list<int> frameIdx) {
+    frameIdx.sort(); frameIdx.unique();
+    auto nFrames = frameIdx.size();
+    auto cIdx = frameIdx.begin();
+    auto eIdx = frameIdx.end();
+    bool check;
+    uint32_t width, height, elem_size;
+    auto pRawSurf = getDecodedSurface(upDecoder.get(), upDemuxer.get());
+    upDecoder->GetDecodedFrameParams(width, height, elem_size);
+    auto pOutput = shared_ptr<Surface>(Surface::Make(RGB, width,
+                           height * nFrames));
+    auto pDst = pOutput->PlanePtr();
+    auto pitch = pOutput->Pitch();
+    int i = 0; /* Current frame counter */
+    while (cIdx != eIdx){
+      if (pRawSurf) {
+          if (i == (*cIdx)) {
+          check = ConvertNV12toRGB(pRawSurf, pDst, pitch);
+          cIdx++; // Next frame
+          pDst += pitch * height; // Move pointer to next frame position
+          if (!check) {
+            py::print("Can not converting surface NV12 to RGB");
+            break;
+          };
+        };
+        i++;
+      } else {
+        py::print("Reached end of video before collect all frames");
+        break;
+      };
+      pRawSurf = getDecodedSurface(upDecoder.get(), upDemuxer.get());
+   }
+   return pOutput;
+  }
+
+  /* Return PyCapsule object with frames inside */
+  py::capsule GetBatchImpl(list<int> frameIdx){
+    frames = GetBatch(frameIdx);
+    return AsCapsule(frames, gpuId);
+  }
+
 };
 
 class PyNvEncoder {
@@ -591,6 +658,43 @@ auto CopySurface = [](shared_ptr<Surface> self, shared_ptr<Surface> other,
   ThrowOnCudaError(cuStreamSynchronize(cudaStream));
 };
 
+struct SurfDLMTensor {
+  shared_ptr<Surface> handle;
+  DLManagedTensor tensor;
+  array<int64_t, 2> shape = {0, 0};
+  array<int64_t, 2> strides = {1, 1};
+};
+
+void deleter(DLManagedTensor* arg) {
+  delete static_cast<SurfDLMTensor*>(arg->manager_ctx);
+};
+
+// This function returns a shared_ptr to memory managed DLpack tensor
+// constructed out of Surface
+DLManagedTensor* toDLPack(shared_ptr<Surface> src, int device_id) {
+  SurfDLMTensor* surface(new SurfDLMTensor);
+  auto plane = src->GetSurfacePlane();
+  surface->handle = src;
+  surface->tensor.manager_ctx = surface;
+  surface->tensor.deleter = &deleter;
+  surface->tensor.dl_tensor.data = (void* ) plane->GpuMem();
+  surface->tensor.dl_tensor.ctx = {kDLGPU, device_id};
+  surface->tensor.dl_tensor.ndim = 2;
+  surface->tensor.dl_tensor.dtype = {kDLUInt, 8, 1};
+  surface->shape[0] = plane->Height();
+  surface->shape[1] = plane->Width();
+  surface->tensor.dl_tensor.shape = &(surface->shape[0]);
+  surface->strides[0] = plane->Pitch();
+  surface->tensor.dl_tensor.strides = &(surface->strides[0]);
+  surface->tensor.dl_tensor.byte_offset = 0;
+  return &(surface->tensor);
+};
+
+py::capsule AsCapsule(shared_ptr<Surface> src, int device_id){
+  DLManagedTensor* ptr = toDLPack(src, device_id);
+  return py::capsule(ptr, "dltensor");
+};
+
 PYBIND11_MODULE(PyNvCodec, m) {
   m.doc() = "Python bindings for Nvidia-accelerated video processing";
 
@@ -670,9 +774,14 @@ PYBIND11_MODULE(PyNvCodec, m) {
       .def("Width", &PyNvDecoder::Width)
       .def("Height", &PyNvDecoder::Height)
       .def("PixelFormat", &PyNvDecoder::GetPixelFormat)
+      .def("Framerate", &PyNvDecoder::GetFramerate)
       .def("DecodeSingleSurface", &PyNvDecoder::DecodeSingleSurface,
            py::return_value_policy::move)
       .def("DecodeSingleFrame", &PyNvDecoder::DecodeSingleFrame,
+           py::return_value_policy::move)
+      .def("GetBatch", &PyNvDecoder::GetBatch,
+           py::return_value_policy::move)
+      .def("GetBatchPacked", &PyNvDecoder::GetBatchImpl,
            py::return_value_policy::move);
 
   py::class_<PyFrameUploader>(m, "PyFrameUploader")
@@ -696,4 +805,5 @@ PYBIND11_MODULE(PyNvCodec, m) {
            py::return_value_policy::move);
 
   m.def("GetNumGpus", &CudaResMgr::GetNumGpus);
+  m.def("dlpacked", &AsCapsule, py::return_value_policy::move);
 }

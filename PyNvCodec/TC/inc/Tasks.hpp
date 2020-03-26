@@ -118,6 +118,7 @@ public:
   DemuxFrame &operator=(const DemuxFrame &other) = delete;
 
   void GetParams(struct MuxingParams &params) const;
+  float GetFramerate() const;
   TaskExecStatus Execute() final;
   ~DemuxFrame() final;
   static DemuxFrame *Make(const char *url);

@@ -547,6 +547,10 @@ void DemuxFrame::GetParams(MuxingParams &params) const {
   params.videoContext.format = NV12;
 }
 
+float DemuxFrame::GetFramerate() const {
+  return pImpl->demuxer.GetFramerate();
+}
+
 namespace VPF {
 struct MuxFrame_Impl {
   AVFormatContext *outFmtCtx = nullptr;

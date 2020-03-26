@@ -72,7 +72,7 @@ public:
 
   uint32_t GetHeight() const;
 
-  uint32_t GetFramerate() const;
+  float GetFramerate() const;
 
   uint32_t GetVideoStreamIndex() const;
 
