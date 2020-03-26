@@ -174,6 +174,8 @@ public:
   }
 };
 
+py::capsule AsCapsule(shared_ptr<Surface> src, int device_id);
+  
 class PySurfaceDownloader {
   unique_ptr<CudaDownloadSurface> upDownloader;
   uint32_t gpuID = 0U, surfaceWidth, surfaceHeight;
